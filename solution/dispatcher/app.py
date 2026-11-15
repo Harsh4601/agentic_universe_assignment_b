@@ -24,7 +24,7 @@ from .db import connect
 from .dispatcher import Dispatcher, DispatchSettings
 from .output import write_final_state
 from .provider import ProviderClient
-from .reconciler import Resolution, resolve_by_request_id
+from .reconciler import Reconciler, ReconcileSettings, Resolution, resolve_by_request_id
 from .store import StaleDatabaseError, Store
 from .webhooks import create_app
 from .windows import next_open
@@ -139,11 +139,16 @@ async def run(settings: AppSettings) -> int:
 async def _serve_and_dispatch(settings: AppSettings, cfg: Config, store: Store, provider: ProviderClient,
                               clock, dispatch_settings: DispatchSettings) -> None:
     dispatcher = Dispatcher(store, provider, clock, cfg, dispatch_settings)
+    reconciler = Reconciler(store, provider, clock,
+                            ReconcileSettings(not_placed_retry_after=dispatch_settings.not_placed_backoff),
+                            owned=lambda: dispatcher.owned_request_ids, on_change=dispatcher.wake)
     web = create_app(store, clock, cfg.webhook_secret, on_result=dispatcher.wake,
-                     extra_status=lambda: {"dispatch_stats": dict(dispatcher.stats)})
+                     extra_status=lambda: {"dispatch_stats": dict(dispatcher.stats),
+                                           "reconcile_stats": dict(reconciler.stats)})
     server = uvicorn.Server(uvicorn.Config(web, host=settings.host, port=settings.port,
                                            log_level="warning", lifespan="off"))
     server_task = asyncio.create_task(server.serve(), name="webhook-server")
+    reconcile_task: asyncio.Task | None = None
     try:
         # Don't place a single call until we can receive its webhook.
         while not server.started:
@@ -152,7 +157,11 @@ async def _serve_and_dispatch(settings: AppSettings, cfg: Config, store: Store, 
                 raise RuntimeError("webhook server stopped during startup")
             await asyncio.sleep(0.01)
         log.info("webhook receiver listening on %s", settings.effective_callback_url)
+        reconcile_task = asyncio.create_task(reconciler.run(should_stop=server_task.done), name="reconciler")
         await dispatcher.run_until_complete(should_stop=server_task.done)
+        log.info("dispatch stats %s, reconcile stats %s", dict(dispatcher.stats), dict(reconciler.stats))
     finally:
+        if reconcile_task is not None:
+            reconcile_task.cancel()
         server.should_exit = True
-        await asyncio.gather(server_task, return_exceptions=True)
+        await asyncio.gather(server_task, *([reconcile_task] if reconcile_task else []), return_exceptions=True)

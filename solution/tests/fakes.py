@@ -10,7 +10,9 @@ class FakeProvider:
     def __init__(self):
         self.posts: list[dict] = []
         self.scripted: dict[str, list] = {}   # request_id -> responses to return in order
-        self.lookups: dict[str, LookupResult] = {}
+        self.lookups: dict[str, LookupResult] = {}        # by request_id
+        self.calls_by_sid: dict[str, LookupResult] = {}   # by call_sid
+        self.get_call_count = 0
         self.raise_on_post: Exception | None = None
 
     def script(self, request_id: str, *responses) -> None:
@@ -30,4 +32,5 @@ class FakeProvider:
         return self.lookups.get(request_id, LookupResult(LookupStatus.NOT_FOUND))
 
     async def get_call(self, call_sid: str) -> LookupResult:
-        return LookupResult(LookupStatus.NOT_FOUND)
+        self.get_call_count += 1
+        return self.calls_by_sid.get(call_sid, LookupResult(LookupStatus.NOT_FOUND))
