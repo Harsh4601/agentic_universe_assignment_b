@@ -40,6 +40,10 @@ _STATE_RANK = {LeadState.PENDING: 0, LeadState.DND_BLOCKED: 1, LeadState.EXHAUST
 class StaleDatabaseError(Exception):
     """The database was built for a different provider run or different fixtures."""
 
+    def __init__(self, key: str, message: str):
+        super().__init__(message)
+        self.key = key  # 'provider_run' or 'fixtures'
+
 
 class ApplyStatus(StrEnum):
     APPLIED = "applied"
@@ -161,9 +165,7 @@ class Store:
                 if have is None:
                     c.execute("INSERT INTO meta (key, value) VALUES (?, ?)", (key, expected))
                 elif have != expected:
-                    raise StaleDatabaseError(
-                        f"database belongs to {key}={have!r}, current is {expected!r}; "
-                        "start with --reset to discard it")
+                    raise StaleDatabaseError(key, f"database belongs to {key}={have!r}, current is {expected!r}")
 
     def seed_leads(self, now: datetime) -> int:
         """Insert every lead from the fixtures. Idempotent: existing leads are left untouched."""
@@ -378,6 +380,13 @@ class Store:
             if outcome.disposition == DND_DISPOSITION:
                 self._propagate_dnd(c, phone, now, exclude=(cid, lid))
         return ApplyStatus.APPLIED
+
+    def settle_dnd_lead(self, campaign_id: str, lead_id: str, now: datetime) -> None:
+        """Finalise a pending lead whose phone is on the DND list (dnd_blocked, or exhausted)."""
+        with self._txn() as c:
+            if c.execute("SELECT 1 FROM leads l JOIN dnd_phones d ON d.phone = l.phone "
+                         "WHERE l.campaign_id = ? AND l.lead_id = ?", (campaign_id, lead_id)).fetchone():
+                self._block_for_dnd(c, campaign_id, lead_id, now)
 
     def _propagate_dnd(self, c: sqlite3.Connection, phone: str, now: datetime, exclude: tuple[str, str]) -> None:
         """R8: every other unfinished lead with this phone stops being dialled."""
